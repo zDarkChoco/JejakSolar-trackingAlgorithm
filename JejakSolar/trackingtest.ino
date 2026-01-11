@@ -5,21 +5,38 @@
 
 // === 1. Define Pins ===
 // Use ADC1 pins (GPIOs 32-39) for best results
-const int LDR_TL_PIN = 36; // Top-Left LDR
-const int LDR_TR_PIN = 39; // Top-Right LDR
-const int LDR_BL_PIN = 34; // Bottom-Left LDR
-const int LDR_BR_PIN = 35; // Bottom-Right LDR
+
+#include <ESP32Servo.h>
+
+Servo myServoX;
+Servo myServoY;
+
+const int LDR_TL_PIN = 33; // Top-Left LDR
+const int LDR_TR_PIN = 32; // Top-Right LDR
+const int LDR_BL_PIN = 35; // Bottom-Left LDR
+const int LDR_BR_PIN = 34; // Bottom-Right LDR
+const int servoPinX = 25; 
+const int servoPinY = 26;
+
+
 
 // === 2. Define Tracking Parameters ===
 // This "dead-zone" stops the servos from "hunting" or twitching for
 // tiny light changes. Increase it if the system is too sensitive.
 int tolerance = 150; 
+int CurX = 90;
+int CurY = 90;
+int rate = 5;
 
 // === 3. Setup Function ===
 void setup() {
   Serial.begin(115200); // Start serial comms for debugging
   Serial.println("\n--- Dual-Axis Tracker Logic Test ---");
   Serial.println("Aim a light source at the sensors.");
+  myServoX.attach(servoPinX);
+  myServoY.attach(servoPinY);
+  myServoX.write(CurX); 
+  myServoY.write(CurY);
 }
 
 // === 4. Main Loop ===
@@ -28,7 +45,7 @@ void loop() {
   trackSun();
   
   // Wait a moment so we don't spam the Serial Monitor
-  delay(500); 
+  delay(200); 
 }
 
 // === 5. Tracking Logic Function ===
@@ -62,13 +79,22 @@ void trackSun() {
 
   // --- E. Make Decisions & Print Actions ---
   // This replaces the servo-moving code for now.
+  myServoX.write(CurX); 
+  myServoY.write(CurY);
 
   // 1. Vertical (Tilt) Motor
   if (vertical_error > tolerance) {
     Serial.println("ACTION: Move DOWN (Top is brighter)");
+    CurX++;
+    myServoX.write(CurX); 
+    Serial.println(CurX);
   } 
   else if (vertical_error < -tolerance) {
+    
+    CurX--;
+    myServoX.write(CurX);
     Serial.println("ACTION: Move UP (Bottom is brighter)");
+    Serial.println(CurX);
   } 
   else {
     Serial.println("ACTION: (Vertical OK)");
@@ -77,9 +103,15 @@ void trackSun() {
   // 2. Horizontal (Pan) Motor
   if (horizontal_error > tolerance) {
     Serial.println("ACTION: Move RIGHT (Left is brighter)");
+    CurY--;
+    myServoY.write(CurY); 
+    Serial.println(CurY);
   } 
   else if (horizontal_error < -tolerance) {
     Serial.println("ACTION: Move LEFT (Right is brighter)");
+    CurY++;
+    myServoY.write(CurY);
+    Serial.println(CurY);
   } 
   else {
     Serial.println("ACTION: (Horizontal OK)");
