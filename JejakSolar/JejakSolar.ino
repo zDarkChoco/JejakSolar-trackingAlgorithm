@@ -8,18 +8,17 @@
 #include <Adafruit_INA219.h>
 #include <time.h> 
 #include "esp_adc_cal.h" 
-#include <ElegantOTA.h> 
+#include <ElegantOTA.h>
+#include <ESP32Servo.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 // --- HARDWARE PIN DEFINITIONS ---
 #define I2C_SDA 21
 #define I2C_SCL 22
-//#define PIN_LM35 35 
-
-// --- CALIBRATION SETTINGS ---
-// We removed the 2.0 multiplier.
-// If the temp is consistently off by a few degrees, change this offset.
-// Example: If real is 26 and screen is 28, set this to -2.0.
-//#define TEMP_OFFSET 0.0 
+#define ONE_WIRE_BUS 4
+#define servoPinX 25
+#define servoPinY 26
 
 // --- LOGGING CONFIGURATION ---
 const long LOG_INTERVAL = 60000; // 1 Minute
@@ -29,14 +28,36 @@ const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec = 28800; 
 const int   daylightOffset_sec = 0;
 
+struct LDRSensor {
+  int pin;          // GPIO Pin
+  int minVal;       // Raw value in complete darkness (Calibrated)
+  int maxVal;       // Raw value in full saturation (Calibrated)
+};
+
+LDRSensor sensorsPIN[4] = {
+  {34, 50, 3865},  // Top Left (LDR1)
+  {35, 280, 4095},  // Top Right (LDR2)
+  {32, 180, 4095},  // Bottom Left (LDR3)
+  {33, 240, 4095}   // Bottom Right (LDR4)
+};
+
+const int Dmin = 20;
+const int Dmax = 160;
+
+float tolerance = 0.1; 
+int CurX = 90;
+int CurY = 90;
+int speed = 50;
+
 // --- GLOBAL OBJECTS ---
+
+Servo myServoX;
+Servo myServoY;
 Adafruit_INA219 ina219;
 WebServer server(80);
 unsigned long lastLogTime = 0;
-
-// --- ADC CALIBRATION ---
-//esp_adc_cal_characteristics_t *adc_chars;
-//#define DEFAULT_VREF 1100 
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
 
 // --- HELPER FUNCTIONS ---
 String getLocalTime() {
@@ -47,27 +68,17 @@ String getLocalTime() {
   return String(timeStringBuff);
 }
 
-/*float readCalibratedTemp() {
-  unsigned long totalMilliVolts = 0;
-  int samples = 60; // Increased samples for 11db stability
-
-  for (int i = 0; i < samples; i++) {
-    int rawValue = analogRead(PIN_LM35);
-    // Convert raw using the 11dB characteristics
-    totalMilliVolts += esp_adc_cal_raw_to_voltage(rawValue, adc_chars);
-    delay(1);
-  }
-
-  float avgMilliVolts = totalMilliVolts / (float)samples;
-
-  // 1. Convert Voltage to Base Temp (10mV = 1C)
-  float baseTemp = avgMilliVolts / 10.0;
-
-  // 2. Apply Offset (No multiplier anymore)
-  float finalTemp = baseTemp + TEMP_OFFSET;
+float readNormalizedLDR(int sensorIndex) {
+  int raw = analogRead(sensorsPIN[sensorIndex].pin);
   
-  return finalTemp;
-}*/
+  raw = constrain(raw, sensorsPIN[sensorIndex].minVal, sensorsPIN[sensorIndex].maxVal);
+
+  // Map raw value to 0.0 - 1.0 (Float precision for better PID control)
+  float normalized = (float)(raw - sensorsPIN[sensorIndex].minVal) / (float)(sensorsPIN[sensorIndex].maxVal - sensorsPIN[sensorIndex].minVal);
+                     
+  return normalized;
+}
+
 
 // --- WEB HANDLERS ---
 void handleRoot() {
@@ -88,13 +99,13 @@ void handleStatus() {
   float busvoltage = ina219.getBusVoltage_V();
   float current_mA = ina219.getCurrent_mA();
   float power_mW = ina219.getPower_mW();
-  //float temp_c = readCalibratedTemp();
+  float temp_c = sensors.getTempCByIndex(0);
   
   StaticJsonDocument<300> doc;
   doc["voltage"] = busvoltage;
   doc["current_mA"] = current_mA;
   doc["power_mW"] = power_mW;
-  doc["temp_c"] = "unavalilable";
+  doc["temp_c"] = temp_c;
   doc["irradiance"] = 0.0;
   doc["mode"] = "AUTO"; 
 
@@ -105,7 +116,7 @@ void handleStatus() {
 
 void logDataToFile() {
   float power_mW = ina219.getPower_mW();
-  //float temp_c = readCalibratedTemp();
+  float temp_c = sensors.getTempCByIndex(0);
   String timeStr = getLocalTime();
 
   File file = LittleFS.open("/log_full.txt", "a");
@@ -113,33 +124,71 @@ void logDataToFile() {
 
   file.print(timeStr);
   file.print(",");
-  //file.print(temp_c, 1); 
-  //file.print(",");
+  file.print(temp_c, 1); 
+  file.print(",");
   file.println(power_mW, 0); 
   file.close();
+}
+
+void track(){
+  float val_TL = readNormalizedLDR(0);
+  float val_TR = readNormalizedLDR(1);
+  float val_BL = readNormalizedLDR(2);
+  float val_BR = readNormalizedLDR(3);
+
+  float avg_top = (val_TL + val_TR) / 2;
+  float avg_bottom = (val_BL + val_BR) / 2;
+  float avg_left = (val_TL + val_BL) / 2;
+  float avg_right = (val_TR + val_BR) / 2;
+
+  float vertical_error = avg_top - avg_bottom;
+  float horizontal_error = avg_left - avg_right;
+
+  if (vertical_error > tolerance) {
+    Serial.println("ACTION: Move DOWN (Top is brighter)");
+    CurX++; 
+  } 
+  else if (vertical_error < -tolerance) {
+    Serial.println("ACTION: Move UP (Bottom is brighter)");
+    CurX--;
+  } 
+  else {
+    Serial.println("ACTION: (Vertical OK)");
+  }
+
+  if(CurX > Dmax) CurX = Dmax;
+  if(CurX < Dmin) CurX = Dmin;
+  myServoX.write(CurX);
+
+  // 2. Horizontal (Pan) Motor
+  if (horizontal_error > tolerance) {
+    Serial.println("ACTION: Move RIGHT (Left is brighter)");
+    CurY--;
+  } 
+  else if (horizontal_error < -tolerance) {
+    Serial.println("ACTION: Move LEFT (Right is brighter)");
+    CurY++;   
+  } 
+  else {
+    Serial.println("ACTION: (Horizontal OK)");
+  }
+  
+  if(CurX > Dmax) CurX = Dmax;
+  if(CurX < Dmin) CurX = Dmin;
+  myServoY.write(CurY);
 }
 
 // --- SETUP ---
 void setup() {
   Serial.begin(115200);
   Serial.println("\n--- BOOTING SOLAR TRACKER ---");
+  
 
   // 1. Filesystem
   if (!LittleFS.begin(false)) LittleFS.begin(true);
 
-  // 2. ADC Calibration (SWITCHED TO 11dB)
-  //analogReadResolution(12);
-  
-  // STRATEGY: Use the widest range (11dB = 0-3.3V)
-  // This matches the default ESP32 behavior and prevents "Half Readings"
-  //analogSetPinAttenuation(PIN_LM35, ADC_11db); 
-  
-  //adc_chars = (esp_adc_cal_characteristics_t *)calloc(1, sizeof(esp_adc_cal_characteristics_t));
-  
-  // Calibrate for 11dB
-  //esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12, DEFAULT_VREF, adc_chars);
-
   // 3. Sensors
+  sensors.begin();
   Wire.begin(I2C_SDA, I2C_SCL);
   if (!ina219.begin()) Serial.println("INA219 Not Found");
 
@@ -149,6 +198,11 @@ void setup() {
     file.println("Time,Power(mW)");
     file.close();
   }
+
+  myServoX.attach(servoPinX);
+  myServoY.attach(servoPinY);
+  myServoX.write(CurX); 
+  myServoY.write(CurY);
 
   // 5. WiFi
   WiFiManager wifiManager;
@@ -177,6 +231,7 @@ void setup() {
 }
 
 void loop() {
+  sensors.requestTemperatures(); 
   server.handleClient();
   
   unsigned long currentMillis = millis();
@@ -184,4 +239,7 @@ void loop() {
     lastLogTime = currentMillis;
     if (WiFi.status() == WL_CONNECTED) logDataToFile();
   }
+
+  track();
+  delay(speed); 
 }
