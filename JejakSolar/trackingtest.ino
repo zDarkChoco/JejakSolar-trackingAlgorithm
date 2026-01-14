@@ -1,119 +1,185 @@
 /*
- * Dual-Axis LDR Tracker - Logic Test
- * Reads 4 LDRs and prints intended actions to the Serial Monitor.
+ * Dual-Axis Solar Tracker with Zenith Inversion Logic
+ * Platform: ESP32
+ * * Logic:
+ * - Reads 4 LDRs (Top-Left, Top-Right, Bottom-Left, Bottom-Right).
+ * - Y-Axis (Tilt): Moves 0-180. 90 is Up. Handles East-West arc.
+ * - X-Axis (Pan): Handles North-South correction.
+ * - INVERSION: When Y-Axis > 90 (facing East), X-Axis controls flip.
  */
-
-// === 1. Define Pins ===
-// Use ADC1 pins (GPIOs 32-39) for best results
 
 #include <ESP32Servo.h>
 
-Servo myServoX;
-Servo myServoY;
-
-const int LDR_TL_PIN = 33; // Top-Left LDR
-const int LDR_TR_PIN = 32; // Top-Right LDR
-const int LDR_BL_PIN = 35; // Bottom-Left LDR
-const int LDR_BR_PIN = 34; // Bottom-Right LDR
-const int servoPinX = 25; 
-const int servoPinY = 26;
+// --- 1. Pin Definitions ---
+// LDR Analog Inputs
 
 
+// Servo Outputs
+const int PIN_SERVO_Y = 25; // Tilt (Elevation/East-West)
+const int PIN_SERVO_X = 26; // Pan (Azimuth/North-South)
 
-// === 2. Define Tracking Parameters ===
-// This "dead-zone" stops the servos from "hunting" or twitching for
-// tiny light changes. Increase it if the system is too sensitive.
-int tolerance = 150; 
-int CurX = 90;
-int CurY = 90;
-int rate = 5;
+// --- 2. Configuration Parameters ---
+// Servo Limits (User defined: 20 to 160)
+const int LIM_MIN = 20;
+const int LIM_MAX = 160;
 
-// === 3. Setup Function ===
-void setup() {
-  Serial.begin(115200); // Start serial comms for debugging
-  Serial.println("\n--- Dual-Axis Tracker Logic Test ---");
-  Serial.println("Aim a light source at the sensors.");
-  myServoX.attach(servoPinX);
-  myServoY.attach(servoPinY);
-  myServoX.write(CurX); 
-  myServoY.write(CurY);
-}
+// Movement Speed (Delay in ms between updates)
+const int SPEED_DELAY = 200; 
 
-// === 4. Main Loop ===
-void loop() {
-  // Call the main tracking function
-  trackSun();
+// Sensitivity (Deadband) - prevents jitter
+const float TOLERANCE = 0.03; 
+
+// --- 3. Global Variables ---
+Servo servoX;
+Servo servoY;
+
+// Initial positions (Start at Zenith/West-ish)
+int posX = 90; 
+int posY = 90;
+
+struct LDRSensor {
+  int pin;          // GPIO Pin
+  int minVal;       // Raw value in complete darkness (Calibrated)
+  int maxVal;       // Raw value in full saturation (Calibrated)
+};
+
+// INITIALIZE SENSORS (Update these values after your Calibration Test)
+// Format: {Pin, Min_Dark_Value, Max_Bright_Value}
+LDRSensor sensors[4] = {
+  {34, 50, 3100},  // Top Left (LDR1)
+  {32, 280, 4095},  // Top Right (LDR2)
+  {35, 180, 4095},  // Bottom Left (LDR3 - The Mismatched One)
+  {33, 240, 4095}   // Bottom Right (LDR4)
+};
+
+// --- NORMALIZED READING FUNCTION ---
+
+float readNormalizedLDR(int sensorIndex) {
+  int raw = analogRead(sensors[sensorIndex].pin);
   
-  // Wait a moment so we don't spam the Serial Monitor
-  delay(200); 
+  // Constrain values to prevent math errors if raw data exceeds expected range
+  raw = constrain(raw, sensors[sensorIndex].minVal, sensors[sensorIndex].maxVal);
+
+  // Map raw value to 0.0 - 1.0 (Float precision for better PID control)
+  // Formula: (Raw - Min) / (Max - Min)
+  float normalized = (float)(raw - sensors[sensorIndex].minVal) / (float)(sensors[sensorIndex].maxVal - sensors[sensorIndex].minVal);
+                     
+  return normalized;
 }
 
-// === 5. Tracking Logic Function ===
-void trackSun() {
-  // --- A. Read Sensor Values ---
-  int val_TL = analogRead(LDR_TL_PIN);
-  int val_TR = analogRead(LDR_TR_PIN);
-  int val_BL = analogRead(LDR_BL_PIN);
-  int val_BR = analogRead(LDR_BR_PIN);
+void setup() {
+  Serial.begin(115200);
+  Serial.println("--- Starting Solar Tracker ---");
 
-  // --- B. Print Raw Values (for testing) ---
-  // This is how you confirm your sensors are working!
-  Serial.println("---");
-  Serial.print("LDR_TL: "); Serial.print(val_TL);
-  Serial.print("\t LDR_TR: "); Serial.println(val_TR);
-  Serial.print("LDR_BL: "); Serial.print(val_BL);
-  Serial.print("\t LDR_BR: "); Serial.println(val_BR);
-  Serial.println("---");
+  // Attach Servos
+  servoX.attach(PIN_SERVO_X);
+  servoY.attach(PIN_SERVO_Y);
 
-  // --- C. Calculate Averages ---
-  int avg_top = (val_TL + val_TR) / 2;
-  int avg_bottom = (val_BL + val_BR) / 2;
-  int avg_left = (val_TL + val_BL) / 2;
-  int avg_right = (val_TR + val_BR) / 2;
+  // Move to initial position
+  servoX.write(posX);
+  servoY.write(posY);
+  
+  
+  delay(1000); // Startup delay
+}
 
-  // --- D. Calculate Error ---
-  // Positive error means top/left is brighter
-  // Negative error means bottom/right is brighter
-  int vertical_error = avg_top - avg_bottom;
-  int horizontal_error = avg_left - avg_right;
+void loop() {
+  // --- A. Read Sensors ---
+  // Note: ESP32 ADC is non-linear, but sufficient for relative tracking.
+  float valTL = readNormalizedLDR(0);
+  float valTR = readNormalizedLDR(1);
+  float valBL = readNormalizedLDR(2);
+  float valBR = readNormalizedLDR(3);
 
-  // --- E. Make Decisions & Print Actions ---
-  // This replaces the servo-moving code for now.
-  myServoX.write(CurX); 
-  myServoY.write(CurY);
+  // --- B. Calculate Averages ---
+  float avgTop   = (valTL + valTR) / 2;
+  float avgBot   = (valBL + valBR) / 2;
+  float avgLeft  = (valTL + valBL) / 2;
+  float avgRight = (valTR + valBR) / 2;
 
-  // 1. Vertical (Tilt) Motor
-  if (vertical_error > tolerance) {
-    Serial.println("ACTION: Move DOWN (Top is brighter)");
-    CurX++;
-    myServoX.write(CurX); 
-    Serial.println(CurX);
-  } 
-  else if (vertical_error < -tolerance) {
+  Serial.print("avgTop: "); Serial.print(avgTop);
+  Serial.print(" | avgBot: "); Serial.print(avgBot);
+  Serial.print(" | avgLeft: "); Serial.print(avgLeft);
+  Serial.print(" | avgRight: "); Serial.println(avgRight);
+
+  // --- C. Logic for Y-Axis (Tilt/Elevation) ---
+  // Assuming logic: If Top is brighter than Bottom, we need to tilt towards Top.
+  // Check your specific servo mechanics: Does angle++ move Up or Down?
+  // Current assumption: Angle++ moves towards East/Down (away from West).
+  // Adjust the '++' and '--' below if it moves the wrong way.
+  
+  float diffY = avgTop - avgBot;
+
+  Serial.print("diffY: "); Serial.print(diffY);
+  //bool isFlipped = (posY > 90);
+  
+  if (abs(diffY) > TOLERANCE) {
+    if (avgTop > avgBot) {
+      // Top is brighter. If 90 is UP and 20 is WEST, we usually need to move closer to 90?
+      // You may need to SWAP these signs based on your physical motor mounting.
+      posY++; 
+    } else {
+      // Bottom is brighter
+      posY--;
+    }
+    if (posY > LIM_MAX) posY = LIM_MAX;
+    if (posY < LIM_MIN) posY = LIM_MIN;
+    servoY.write(posY);
+  }
+
+  // Constrain Y to user limits
+  
+
+  // --- D. Logic for X-Axis (Pan) WITH INVERSION ---
+  float diffX = avgLeft - avgRight;
+
+  Serial.print(" | diffX: "); Serial.println(diffX);
+
+  if (abs(diffY) <= TOLERANCE && abs(diffX) > TOLERANCE) {
     
-    CurX--;
-    myServoX.write(CurX);
-    Serial.println("ACTION: Move UP (Bottom is brighter)");
-    Serial.println(CurX);
-  } 
-  else {
-    Serial.println("ACTION: (Vertical OK)");
+    // Determine Tracking Direction
+    bool moveLeft = (avgLeft > avgRight); // Light is on Left
+    bool moveRight = (avgRight > avgLeft); // Light is on Right
+    
+    // CHECK ORIENTATION: Is the panel flipped over the top?
+    // If Y > 90, we are "looking back" (East), so Left/Right commands must swap.
+    bool isFlipped = (posY > 90); 
+
+    if (moveLeft) {
+      
+        if (isFlipped) {
+        // Inverted: Light is Left (sensor), but physically we must turn Right
+        posX++; 
+      } else {
+        // Normal: Light is Left, turn Left
+        posX--; 
+      } 
+      
+    } 
+    else if (moveRight) {
+      
+        // Normal: Light is Right, turn Right
+       if (isFlipped) {
+        // Inverted: Light is Right (sensor), but physically we must turn Left
+        posX--; 
+      } else {
+        // Normal: Light is Right, turn Right
+        posX++; 
+      } 
+      
+    }
+    if (posX > LIM_MAX) posX = LIM_MAX;
+    if (posX < LIM_MIN) posX = LIM_MIN;
+    servoX.write(posX);
   }
 
-  // 2. Horizontal (Pan) Motor
-  if (horizontal_error > tolerance) {
-    Serial.println("ACTION: Move RIGHT (Left is brighter)");
-    CurY--;
-    myServoY.write(CurY); 
-    Serial.println(CurY);
-  } 
-  else if (horizontal_error < -tolerance) {
-    Serial.println("ACTION: Move LEFT (Right is brighter)");
-    CurY++;
-    myServoY.write(CurY);
-    Serial.println(CurY);
-  } 
-  else {
-    Serial.println("ACTION: (Horizontal OK)");
-  }
+  // Constrain X to user limits
+  
+
+  // --- E. Debugging (Optional) ---
+   Serial.println("Y: "); Serial.print(posY);
+   Serial.print(" | X: "); Serial.print(posX);
+   Serial.print(" | Flipped: "); Serial.println(posY > 90);
+
+  delay(SPEED_DELAY);
 }
