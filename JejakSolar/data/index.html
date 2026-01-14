@@ -4,9 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Solar Tracker Pro</title>
-    
     <script src="chart.min.js"></script>
-
     <style>
         :root {
             --primary: #2c3e50;
@@ -22,14 +20,14 @@
         body {
             font-family: 'Segoe UI', sans-serif;
             background-color: var(--bg);
-            margin: 0;
-            padding: 0;
+            margin: 0; padding: 0;
             padding-top: calc(var(--header-height) + 20px); 
             padding-bottom: calc(var(--nav-height-mobile) + 20px);
             transition: padding-left 0.3s;
+            user-select: none; /* Prevent text selection while dragging knobs */
         }
 
-        /* --- HEADER & SIDEBAR (Same as before) --- */
+        /* --- HEADER & SIDEBAR --- */
         .header-bar {
             position: fixed; top: 0; left: 0; width: 100%; height: var(--header-height);
             background-color: white; box-shadow: 0 2px 5px rgba(0,0,0,0.1);
@@ -76,18 +74,42 @@
             text-decoration: none; display: inline-block; margin-bottom: 15px;
         }
 
-        /* --- GRAPH TABS (NEW) --- */
-        .chart-tabs {
-            display: flex; justify-content: center; gap: 10px; margin-bottom: 15px;
+        /* --- KNOB CONTROLS (NEW) --- */
+        .knob-container {
+            display: flex; justify-content: space-around; flex-wrap: wrap; gap: 20px; padding: 20px 0;
         }
+        .knob-wrapper {
+            display: flex; flex-direction: column; align-items: center; width: 120px;
+        }
+        .knob-outer {
+            width: 100px; height: 100px; border-radius: 50%;
+            background: #ecf0f1; position: relative;
+            box-shadow: inset 0 2px 5px rgba(0,0,0,0.1);
+            border: 2px solid #bdc3c7;
+            touch-action: none; cursor: pointer;
+        }
+        .knob-outer.disabled { opacity: 0.5; pointer-events: none; }
+        
+        .knob-dial {
+            width: 100%; height: 100%; border-radius: 50%;
+            position: absolute; top: 0; left: 0;
+            transition: transform 0.1s cubic-bezier(0.4, 0.0, 0.2, 1);
+        }
+        .knob-dial::after {
+            content: ''; position: absolute; top: 10px; left: 50%;
+            width: 6px; height: 20px; background: var(--accent);
+            transform: translateX(-50%); border-radius: 3px;
+        }
+        .knob-label { margin-top: 10px; font-weight: bold; color: var(--primary); }
+        .knob-value { color: var(--accent); font-size: 1.2rem; margin-bottom: 5px; }
+
+        /* --- GRAPH TABS --- */
+        .chart-tabs { display: flex; justify-content: center; gap: 10px; margin-bottom: 15px; }
         .tab-btn {
             padding: 8px 16px; border: 1px solid var(--primary); background: white;
-            color: var(--primary); border-radius: 20px; cursor: pointer; font-size: 0.9rem; font-weight: bold;
-            transition: 0.3s;
+            color: var(--primary); border-radius: 20px; cursor: pointer; font-size: 0.9rem; font-weight: bold; transition: 0.3s;
         }
-        .tab-btn.active {
-            background: var(--primary); color: white;
-        }
+        .tab-btn.active { background: var(--primary); color: white; }
 
         /* --- TABLE --- */
         table { width: 100%; border-collapse: collapse; margin-top: 10px; }
@@ -131,8 +153,8 @@
     </div>
 
     <div id="mySidebar" class="sidebar">
-        <a href="#" onclick="showView('history')" class="active">History Log</a>
-        <a href="#" onclick="showView('dashboard')">Live Monitor</a>
+        <a href="#" onclick="showView('history')">History Log</a>
+        <a href="#" onclick="showView('dashboard')" class="active">Live Monitor</a>
         <a href="#" onclick="showView('control')">Manual Control</a>
     </div>
 
@@ -190,10 +212,23 @@
                 <button id="mode-btn" class="btn-action" style="width:100%;" onclick="toggleMode()">SWITCH TO MANUAL</button>
             </div>
             <div class="card">
-                <h3 style="text-align:left;">Pan: <span style="float:right;" id="pan-val">90°</span></h3>
-                <input type="range" id="pan-slider" min="0" max="180" value="90" disabled oninput="updateServo('pan', this.value)">
-                <h3 style="text-align:left; margin-top:20px;">Tilt: <span style="float:right;" id="tilt-val">45°</span></h3>
-                <input type="range" id="tilt-slider" min="0" max="180" value="45" disabled oninput="updateServo('tilt', this.value)">
+                <div class="knob-container">
+                    <div class="knob-wrapper">
+                        <span class="knob-value" id="pan-display">90°</span>
+                        <div id="pan-knob" class="knob-outer disabled">
+                            <div class="knob-dial" style="transform: rotate(-90deg);"></div> </div>
+                        <span class="knob-label">PAN (East-West)</span>
+                    </div>
+
+                    <div class="knob-wrapper">
+                        <span class="knob-value" id="tilt-display">45°</span>
+                        <div id="tilt-knob" class="knob-outer disabled">
+                            <div class="knob-dial" style="transform: rotate(0deg);"></div>
+                        </div>
+                        <span class="knob-label">TILT (Up-Down)</span>
+                    </div>
+                </div>
+                <p style="color:#7f8c8d; font-size:0.9rem;">Drag the knobs to adjust angle.</p>
             </div>
         </div>
     </div>
@@ -211,68 +246,125 @@
             document.querySelectorAll('.view-section').forEach(el => el.classList.remove('active'));
             document.querySelectorAll('.mobile-nav .nav-item').forEach(el => el.classList.remove('active'));
             document.querySelectorAll('.sidebar a').forEach(el => el.classList.remove('active'));
+            
             document.getElementById(viewId).classList.add('active');
             document.getElementById('nav-' + viewId)?.classList.add('active');
+            
+            // Sync Sidebar
+            const sideLinks = document.querySelectorAll('.sidebar a');
+            if(viewId === 'history') sideLinks[0].classList.add('active');
+            if(viewId === 'dashboard') sideLinks[1].classList.add('active');
+            if(viewId === 'control') sideLinks[2].classList.add('active');
+
             if(viewId === 'history') loadHistory();
         }
 
-        // --- CHART VARIABLES ---
-        let chartMetric = 'power'; // Default view
+        // --- KNOB LOGIC (NEW) ---
+        function setupKnob(id, displayId, axisName) {
+            const el = document.getElementById(id);
+            const dial = el.querySelector('.knob-dial');
+            const display = document.getElementById(displayId);
+            let isDragging = false;
+
+            function updateAngle(e) {
+                if(el.classList.contains('disabled')) return;
+                
+                const rect = el.getBoundingClientRect();
+                const centerX = rect.left + rect.width / 2;
+                const centerY = rect.top + rect.height / 2;
+                
+                const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+                
+                // Calculate angle in radians
+                const deltaX = clientX - centerX;
+                const deltaY = clientY - centerY;
+                let angleRad = Math.atan2(deltaY, deltaX);
+                
+                // Convert to degrees and shift so -90deg (12 o'clock) is start
+                let deg = angleRad * (180 / Math.PI);
+                deg = (deg + 90 + 360) % 360; // Normalize 0-360
+
+                // Constrain to 0-180 logic (for servos)
+                // We map dial rotation: 
+                // Left (-90 vis) = 0 servo
+                // Right (90 vis) = 180 servo
+                // Let's assume standard pot behavior: 7am to 5pm
+                
+                // Simple mapping: 0 deg is Left, 180 deg is Right.
+                // We clamp values to make it behave like a 180 degree pot
+                // The visual rotation needs to offset.
+                
+                // Simplified constraint for visual UI:
+                // Map screen angle to servo angle
+                // Let's use direct mapping for simplicity
+                // Using CSS rotation directly
+                
+                let servoVal = 0;
+                
+                // Logic: 
+                // 0 degrees (Up) -> 90 servo
+                // 90 degrees (Right) -> 180 servo
+                // 270 degrees (Left) -> 0 servo
+                
+                if (deg > 270 || deg <= 90) { // Top half
+                     if (deg > 270) servoVal = (deg - 270);
+                     else servoVal = deg + 90;
+                } else if (deg > 90 && deg < 270) {
+                     // Bottom half - clamp
+                     if(deg < 180) servoVal = 180;
+                     else servoVal = 0;
+                }
+                
+                // Update UI
+                // Actual visual rotation
+                dial.style.transform = `rotate(${servoVal - 90}deg)`; 
+                display.innerText = Math.round(servoVal) + "°";
+                
+                // Throttled send (optional, but good for esp32)
+                updateServo(axisName, Math.round(servoVal));
+            }
+
+            el.addEventListener('mousedown', (e) => { isDragging = true; updateAngle(e); });
+            window.addEventListener('mousemove', (e) => { if(isDragging) updateAngle(e); });
+            window.addEventListener('mouseup', () => { isDragging = false; });
+            
+            el.addEventListener('touchstart', (e) => { isDragging = true; updateAngle(e); e.preventDefault(); });
+            window.addEventListener('touchmove', (e) => { if(isDragging) updateAngle(e); e.preventDefault(); });
+            window.addEventListener('touchend', () => { isDragging = false; });
+        }
+        
+        setupKnob('pan-knob', 'pan-display', 'pan');
+        setupKnob('tilt-knob', 'tilt-display', 'tilt');
+
+        // --- CHART & DATA FETCHING ---
+        let chartMetric = 'power';
         const ctx = document.getElementById('solarChart').getContext('2d');
         const solarChart = new Chart(ctx, {
             type: 'line',
-            data: {
-                labels: [],
-                datasets: [{
-                    label: 'Metric',
-                    data: [],
-                    borderColor: '#e67e22',
-                    backgroundColor: 'rgba(230, 126, 34, 0.1)',
-                    fill: true,
-                    tension: 0.3
-                }]
-            },
+            data: { labels: [], datasets: [{ label: 'Metric', data: [], borderColor: '#e67e22', backgroundColor: 'rgba(230, 126, 34, 0.1)', fill: true, tension: 0.3 }] },
             options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { display: false } } }
         });
 
-        // --- NEW: SWITCH GRAPH METRIC ---
         function switchGraph(metric) {
             chartMetric = metric;
-            // Update Buttons
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             event.target.classList.add('active');
-            
-            // Clear Chart to prepare for new scale
-            solarChart.data.datasets[0].data = [];
-            solarChart.data.labels = [];
-            
-            // Update Color based on metric
-            if(metric === 'power') {
-                solarChart.data.datasets[0].borderColor = '#e67e22'; // Orange
-                solarChart.data.datasets[0].backgroundColor = 'rgba(230, 126, 34, 0.1)';
-            } else if (metric === 'voltage') {
-                solarChart.data.datasets[0].borderColor = '#2980b9'; // Blue
-                solarChart.data.datasets[0].backgroundColor = 'rgba(41, 128, 185, 0.1)';
-            } else {
-                solarChart.data.datasets[0].borderColor = '#27ae60'; // Green
-                solarChart.data.datasets[0].backgroundColor = 'rgba(39, 174, 96, 0.1)';
-            }
+            solarChart.data.datasets[0].data = []; solarChart.data.labels = [];
+            if(metric === 'power') { solarChart.data.datasets[0].borderColor = '#e67e22'; solarChart.data.datasets[0].backgroundColor = 'rgba(230, 126, 34, 0.1)'; }
+            else if (metric === 'voltage') { solarChart.data.datasets[0].borderColor = '#2980b9'; solarChart.data.datasets[0].backgroundColor = 'rgba(41, 128, 185, 0.1)'; }
+            else { solarChart.data.datasets[0].borderColor = '#27ae60'; solarChart.data.datasets[0].backgroundColor = 'rgba(39, 174, 96, 0.1)'; }
             solarChart.update();
         }
 
-        // --- FETCH DATA ---
         function updateStatusUI(isOnline, voltage) {
             const sysEl = document.getElementById('sys-status');
             const battEl = document.getElementById('batt-status');
-            if (isOnline) {
-                sysEl.innerText = "System: Online"; sysEl.className = "status-text text-ok";
-            } else {
-                sysEl.innerText = "System: Offline"; sysEl.className = "status-text text-err";
-            }
+            sysEl.innerText = isOnline ? "System: Online" : "System: Offline";
+            sysEl.className = isOnline ? "status-text text-ok" : "status-text text-err";
             if (voltage > 0) {
                 let pct = (voltage - 3.0) / (4.2 - 3.0) * 100;
-                if (pct > 100) pct = 100; if (pct < 0) pct = 0;
-                battEl.innerText = "Battery: " + Math.round(pct) + "%";
+                battEl.innerText = "Battery: " + Math.round(Math.max(0, Math.min(100, pct))) + "%";
             } else { battEl.innerText = "Battery: --%"; }
         }
 
@@ -282,58 +374,49 @@
                 document.getElementById('val-volt').innerText = data.voltage.toFixed(2);
                 document.getElementById('val-curr').innerText = data.current_mA.toFixed(1);
                 document.getElementById('val-power').innerText = data.power_mW.toFixed(1);
-                document.getElementById('val-temp').innerText = data.temp_c.toFixed(1);
+                document.getElementById('val-temp').innerText = (data.temp_c === "unavailable") ? "--" : data.temp_c;
                 document.getElementById('val-lux').innerText = data.irradiance || 0;
 
-                // UPDATE CHART
                 const now = new Date().toLocaleTimeString();
-                if(solarChart.data.labels.length > 20) {
-                    solarChart.data.labels.shift();
-                    solarChart.data.datasets[0].data.shift();
-                }
+                if(solarChart.data.labels.length > 20) { solarChart.data.labels.shift(); solarChart.data.datasets[0].data.shift(); }
                 solarChart.data.labels.push(now);
-
-                // Decide which data to push based on 'chartMetric'
-                let val = 0;
-                if(chartMetric === 'power') val = data.power_mW;
-                else if(chartMetric === 'voltage') val = data.voltage;
-                else if(chartMetric === 'current') val = data.current_mA;
-
+                let val = (chartMetric === 'power') ? data.power_mW : (chartMetric === 'voltage') ? data.voltage : data.current_mA;
                 solarChart.data.datasets[0].data.push(val);
                 solarChart.update();
 
                 const isManual = (data.mode === "MANUAL");
                 document.getElementById('mode-btn').innerText = isManual ? "SWITCH TO AUTO" : "SWITCH TO MANUAL";
-                document.getElementById('pan-slider').disabled = !isManual;
-                document.getElementById('tilt-slider').disabled = !isManual;
+                
+                // Toggle Knob State
+                const knobs = document.querySelectorAll('.knob-outer');
+                knobs.forEach(k => isManual ? k.classList.remove('disabled') : k.classList.add('disabled'));
             }).catch(e => { updateStatusUI(false, 0); });
         }
         setInterval(fetchData, 2000);
 
         function toggleMode() { fetch('/setMode?toggle=1'); }
-        function updateServo(axis, val) { 
-            document.getElementById(axis+'-val').innerText = val + "°";
-            fetch(`/setServo?axis=${axis}&val=${val}`); 
+        
+        let lastSend = 0;
+        function updateServo(axis, val) {
+            const now = Date.now();
+            if(now - lastSend > 100) { // Throttle requests to prevent ESP crash
+                fetch(`/setServo?axis=${axis}&val=${val}`);
+                lastSend = now;
+            }
         }
 
         function loadHistory() {
-            fetch('/log_full.txt')
-            .then(response => response.text())
-            .then(data => {
-                const rows = data.split('\n');
-                const tbody = document.getElementById('history-body');
-                tbody.innerHTML = '';
-                // Skip header (i=1), read last 15 rows
+            fetch('/log_full.txt').then(r => r.text()).then(d => {
+                const rows = d.split('\n'); const tbody = document.getElementById('history-body'); tbody.innerHTML = '';
                 for(let i = rows.length - 2; i >= 1 && i > rows.length - 17; i--) {
                     const cols = rows[i].split(',');
-                    if(cols.length >= 3) {
+                    if(cols.length >= 2) {
                         const tr = document.createElement('tr');
-                        tr.innerHTML = `<td>${cols[0]}</td><td>${cols[1]}</td><td>${cols[2]}</td>`;
+                        tr.innerHTML = `<td>${cols[0]}</td><td>--</td><td>${cols[1]}</td>`;
                         tbody.appendChild(tr);
                     }
                 }
-            })
-            .catch(err => document.getElementById('history-body').innerHTML = '<tr><td colspan="3">Log empty or loading...</td></tr>');
+            }).catch(e => document.getElementById('history-body').innerHTML = '<tr><td colspan="3">Log empty...</td></tr>');
         }
     </script>
 </body>
