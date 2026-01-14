@@ -17,8 +17,9 @@
 #define I2C_SDA 21
 #define I2C_SCL 22
 #define ONE_WIRE_BUS 4
-#define servoPinX 25
-#define servoPinY 26
+#define servoPinX 26
+#define servoPinY 25
+
 
 // --- LOGGING CONFIGURATION ---
 const long LOG_INTERVAL = 60000; // 1 Minute
@@ -35,19 +36,19 @@ struct LDRSensor {
 };
 
 LDRSensor sensorsPIN[4] = {
-  {34, 50, 3865},  // Top Left (LDR1)
-  {35, 280, 4095},  // Top Right (LDR2)
-  {32, 180, 4095},  // Bottom Left (LDR3)
+  {34, 40, 3095},  // Top Left (LDR1)
+  {32, 280, 4095},  // Top Right (LDR2)
+  {35, 180, 4095},  // Bottom Left (LDR3)
   {33, 240, 4095}   // Bottom Right (LDR4)
 };
 
 const int Dmin = 20;
 const int Dmax = 160;
 
-float tolerance = 0.1; 
+float tolerance = 0.03; 
 int CurX = 90;
 int CurY = 90;
-int speed = 50;
+int speed = 100;
 
 // --- GLOBAL OBJECTS ---
 
@@ -131,55 +132,97 @@ void logDataToFile() {
 }
 
 void track(){
-  float val_TL = readNormalizedLDR(0);
-  float val_TR = readNormalizedLDR(1);
-  float val_BL = readNormalizedLDR(2);
-  float val_BR = readNormalizedLDR(3);
+  float valTL = readNormalizedLDR(0);
+  float valTR = readNormalizedLDR(1);
+  float valBL = readNormalizedLDR(2);
+  float valBR = readNormalizedLDR(3);
 
-  float avg_top = (val_TL + val_TR) / 2;
-  float avg_bottom = (val_BL + val_BR) / 2;
-  float avg_left = (val_TL + val_BL) / 2;
-  float avg_right = (val_TR + val_BR) / 2;
+  // --- B. Calculate Averages ---
+  float avgTop   = (valTL + valTR) / 2;
+  float avgBot   = (valBL + valBR) / 2;
+  float avgLeft  = (valTL + valBL) / 2;
+  float avgRight = (valTR + valBR) / 2;
 
-  float vertical_error = avg_top - avg_bottom;
-  float horizontal_error = avg_left - avg_right;
+  Serial.print("avgTop: "); Serial.print(avgTop);
+  Serial.print(" | avgBot: "); Serial.print(avgBot);
+  Serial.print(" | avgLeft: "); Serial.print(avgLeft);
+  Serial.print(" | avgRight: "); Serial.println(avgRight);
 
-  if (vertical_error > tolerance) {
-    Serial.println("ACTION: Move DOWN (Top is brighter)");
-    CurX++; 
-  } 
-  else if (vertical_error < -tolerance) {
-    Serial.println("ACTION: Move UP (Bottom is brighter)");
-    CurX--;
-  } 
-  else {
-    Serial.println("ACTION: (Vertical OK)");
-  }
-
-  if(CurX > Dmax) CurX = Dmax;
-  if(CurX < Dmin) CurX = Dmin;
-  myServoX.write(CurX);
-
-  // 2. Horizontal (Pan) Motor
-  if (horizontal_error > tolerance) {
-    Serial.println("ACTION: Move RIGHT (Left is brighter)");
-    CurY--;
-  } 
-  else if (horizontal_error < -tolerance) {
-    Serial.println("ACTION: Move LEFT (Right is brighter)");
-    CurY++;   
-  } 
-  else {
-    Serial.println("ACTION: (Horizontal OK)");
-  }
+  // --- C. Logic for Y-Axis (Tilt/Elevation) ---
+  // Assuming logic: If Top is brighter than Bottom, we need to tilt towards Top.
+  // Check your specific servo mechanics: Does angle++ move Up or Down?
+  // Current assumption: Angle++ moves towards East/Down (away from West).
+  // Adjust the '++' and '--' below if it moves the wrong way.
   
-  if(CurX > Dmax) CurX = Dmax;
-  if(CurX < Dmin) CurX = Dmin;
-  myServoY.write(CurY);
+  float diffY = avgTop - avgBot;
+
+  Serial.print("diffY: "); Serial.print(diffY);
+  //bool isFlipped = (posY > 90);
+  
+  if (abs(diffY) > tolerance) {
+    if (avgTop > avgBot) {
+      // Top is brighter. If 90 is UP and 20 is WEST, we usually need to move closer to 90?
+      // You may need to SWAP these signs based on your physical motor mounting.
+      CurY++; 
+    } else {
+      // Bottom is brighter
+      CurY--;
+    }
+    if (CurY > Dmax) CurY = Dmax;
+    if (CurY < Dmin) CurY = Dmin;
+    myServoY.write(CurY);
+  }
+
+  // Constrain Y to user limits
+  
+
+  // --- D. Logic for X-Axis (Pan) WITH INVERSION ---
+  float diffX = avgLeft - avgRight;
+
+  Serial.print(" | diffX: "); Serial.println(diffX);
+
+  if (abs(diffY) <= tolerance && abs(diffX) > tolerance) {
+    
+    // Determine Tracking Direction
+    bool moveLeft = (avgLeft > avgRight); // Light is on Left
+    bool moveRight = (avgRight > avgLeft); // Light is on Right
+    
+    // CHECK ORIENTATION: Is the panel flipped over the top?
+    // If Y > 90, we are "looking back" (East), so Left/Right commands must swap.
+    bool isFlipped = (CurY > 90); 
+
+    if (moveLeft) {
+      
+        if (isFlipped) {
+        // Inverted: Light is Left (sensor), but physically we must turn Right
+        CurX++; 
+      } else {
+        // Normal: Light is Left, turn Left
+        CurX--; 
+      } 
+      
+    } 
+    else if (moveRight) {
+      
+        // Normal: Light is Right, turn Right
+       if (isFlipped) {
+        // Inverted: Light is Right (sensor), but physically we must turn Left
+        CurX--; 
+      } else {
+        // Normal: Light is Right, turn Right
+        CurX++; 
+      } 
+      
+    }
+    if (CurX > Dmax) CurX = Dmax;
+    if (CurX < Dmin) CurX = Dmin;
+    myServoX.write(CurX);
+  }
 }
 
 // --- SETUP ---
 void setup() {
+  
   Serial.begin(115200);
   Serial.println("\n--- BOOTING SOLAR TRACKER ---");
   
@@ -201,6 +244,8 @@ void setup() {
 
   myServoX.attach(servoPinX);
   myServoY.attach(servoPinY);
+  
+  
   myServoX.write(CurX); 
   myServoY.write(CurY);
 
