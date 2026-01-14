@@ -20,7 +20,6 @@
 #define servoPinX 26
 #define servoPinY 25
 
-
 // --- LOGGING CONFIGURATION ---
 const long LOG_INTERVAL = 60000; // 1 Minute
 
@@ -36,22 +35,22 @@ struct LDRSensor {
 };
 
 LDRSensor sensorsPIN[4] = {
-  {34, 40, 3095},  // Top Left (LDR1)
+  {34, 40, 3095},   // Top Left (LDR1)
   {32, 280, 4095},  // Top Right (LDR2)
   {35, 180, 4095},  // Bottom Left (LDR3)
   {33, 240, 4095}   // Bottom Right (LDR4)
 };
 
-const int Dmin = 20;
-const int Dmax = 160;
+const int Dmin = 0;   // Expanded range for manual control (0-180)
+const int Dmax = 180;
 
 float tolerance = 0.03; 
 int CurX = 90;
 int CurY = 90;
 int speed = 100;
+bool isManualMode = false; // [NEW] Flag for Manual Mode
 
 // --- GLOBAL OBJECTS ---
-
 Servo myServoX;
 Servo myServoY;
 Adafruit_INA219 ina219;
@@ -71,15 +70,11 @@ String getLocalTime() {
 
 float readNormalizedLDR(int sensorIndex) {
   int raw = analogRead(sensorsPIN[sensorIndex].pin);
-  
   raw = constrain(raw, sensorsPIN[sensorIndex].minVal, sensorsPIN[sensorIndex].maxVal);
-
-  // Map raw value to 0.0 - 1.0 (Float precision for better PID control)
-  float normalized = (float)(raw - sensorsPIN[sensorIndex].minVal) / (float)(sensorsPIN[sensorIndex].maxVal - sensorsPIN[sensorIndex].minVal);
-                     
+  // Map raw value to 0.0 - 1.0
+  float normalized = (float)(raw - sensorsPIN[sensorIndex].minVal) / (float)(sensorsPIN[sensorIndex].maxVal - sensorsPIN[sensorIndex].minVal);           
   return normalized;
 }
-
 
 // --- WEB HANDLERS ---
 void handleRoot() {
@@ -96,6 +91,42 @@ void handleChartJS() {
   file.close();
 }
 
+// [NEW] Handle Mode Switching (Auto <-> Manual)
+void handleSetMode() {
+  if (server.hasArg("toggle")) {
+    isManualMode = !isManualMode;
+    Serial.println(isManualMode ? "Switched to MANUAL" : "Switched to AUTO");
+  }
+  server.send(200, "text/plain", isManualMode ? "MANUAL" : "AUTO");
+}
+
+// [NEW] Handle Manual Servo Control
+void handleSetServo() {
+  if (!isManualMode) {
+    server.send(403, "text/plain", "Denied: System is in AUTO mode");
+    return;
+  }
+  
+  if (server.hasArg("axis") && server.hasArg("val")) {
+    String axis = server.arg("axis");
+    int val = server.arg("val").toInt();
+    
+    // Safety Constrain
+    val = constrain(val, Dmin, Dmax);
+
+    if (axis == "pan") {
+      CurX = val;
+      myServoX.write(CurX);
+    } else if (axis == "tilt") {
+      CurY = val;
+      myServoY.write(CurY);
+    }
+    server.send(200, "text/plain", "OK");
+  } else {
+    server.send(400, "text/plain", "Bad Args");
+  }
+}
+
 void handleStatus() {
   float busvoltage = ina219.getBusVoltage_V();
   float current_mA = ina219.getCurrent_mA();
@@ -108,7 +139,9 @@ void handleStatus() {
   doc["power_mW"] = power_mW;
   doc["temp_c"] = temp_c;
   doc["irradiance"] = 0.0;
-  doc["mode"] = "AUTO"; 
+  
+  // [UPDATED] Send actual mode status
+  doc["mode"] = isManualMode ? "MANUAL" : "AUTO"; 
 
   String jsonString;
   serializeJson(doc, jsonString);
@@ -149,23 +182,13 @@ void track(){
   Serial.print(" | avgRight: "); Serial.println(avgRight);
 
   // --- C. Logic for Y-Axis (Tilt/Elevation) ---
-  // Assuming logic: If Top is brighter than Bottom, we need to tilt towards Top.
-  // Check your specific servo mechanics: Does angle++ move Up or Down?
-  // Current assumption: Angle++ moves towards East/Down (away from West).
-  // Adjust the '++' and '--' below if it moves the wrong way.
-  
   float diffY = avgTop - avgBot;
-
   Serial.print("diffY: "); Serial.print(diffY);
-  //bool isFlipped = (posY > 90);
   
   if (abs(diffY) > tolerance) {
     if (avgTop > avgBot) {
-      // Top is brighter. If 90 is UP and 20 is WEST, we usually need to move closer to 90?
-      // You may need to SWAP these signs based on your physical motor mounting.
       CurY++; 
     } else {
-      // Bottom is brighter
       CurY--;
     }
     if (CurY > Dmax) CurY = Dmax;
@@ -173,47 +196,26 @@ void track(){
     myServoY.write(CurY);
   }
 
-  // Constrain Y to user limits
-  
-
   // --- D. Logic for X-Axis (Pan) WITH INVERSION ---
   float diffX = avgLeft - avgRight;
-
   Serial.print(" | diffX: "); Serial.println(diffX);
 
   if (abs(diffY) <= tolerance && abs(diffX) > tolerance) {
+    bool moveLeft = (avgLeft > avgRight); 
+    bool moveRight = (avgRight > avgLeft); 
     
-    // Determine Tracking Direction
-    bool moveLeft = (avgLeft > avgRight); // Light is on Left
-    bool moveRight = (avgRight > avgLeft); // Light is on Right
-    
-    // CHECK ORIENTATION: Is the panel flipped over the top?
-    // If Y > 90, we are "looking back" (East), so Left/Right commands must swap.
+    // Invert Pan controls if we are tilted "over the back" (>90)
     bool isFlipped = (CurY > 90); 
 
     if (moveLeft) {
-      
-        if (isFlipped) {
-        // Inverted: Light is Left (sensor), but physically we must turn Right
-        CurX++; 
-      } else {
-        // Normal: Light is Left, turn Left
-        CurX--; 
-      } 
-      
+        if (isFlipped) CurX++; // Inverted
+        else CurX--; // Normal
     } 
     else if (moveRight) {
-      
-        // Normal: Light is Right, turn Right
-       if (isFlipped) {
-        // Inverted: Light is Right (sensor), but physically we must turn Left
-        CurX--; 
-      } else {
-        // Normal: Light is Right, turn Right
-        CurX++; 
-      } 
-      
+       if (isFlipped) CurX--; // Inverted
+       else CurX++; // Normal
     }
+    
     if (CurX > Dmax) CurX = Dmax;
     if (CurX < Dmin) CurX = Dmin;
     myServoX.write(CurX);
@@ -222,30 +224,27 @@ void track(){
 
 // --- SETUP ---
 void setup() {
-  
   Serial.begin(115200);
   Serial.println("\n--- BOOTING SOLAR TRACKER ---");
-  
 
   // 1. Filesystem
   if (!LittleFS.begin(false)) LittleFS.begin(true);
 
-  // 3. Sensors
+  // 2. Sensors
   sensors.begin();
   Wire.begin(I2C_SDA, I2C_SCL);
   if (!ina219.begin()) Serial.println("INA219 Not Found");
 
-  // 4. Log File
+  // 3. Log File
   if (!LittleFS.exists("/log_full.txt")) {
     File file = LittleFS.open("/log_full.txt", "w");
     file.println("Time,Power(mW)");
     file.close();
   }
 
+  // 4. Servos
   myServoX.attach(servoPinX);
   myServoY.attach(servoPinY);
-  
-  
   myServoX.write(CurX); 
   myServoY.write(CurY);
 
@@ -266,6 +265,11 @@ void setup() {
   server.on("/index.html", HTTP_GET, handleRoot);
   server.on("/chart.min.js", HTTP_GET, handleChartJS);
   server.on("/status", HTTP_GET, handleStatus);
+  
+  // [NEW] Register Manual Control Handlers
+  server.on("/setMode", HTTP_GET, handleSetMode);
+  server.on("/setServo", HTTP_GET, handleSetServo);
+
   server.serveStatic("/log_full.txt", LittleFS, "/log_full.txt");
 
   // --- START ELEGANT OTA ---
@@ -278,6 +282,7 @@ void setup() {
 void loop() {
   sensors.requestTemperatures(); 
   server.handleClient();
+  ElegantOTA.loop(); // Don't forget OTA loop if you use it!
   
   unsigned long currentMillis = millis();
   if (currentMillis - lastLogTime >= LOG_INTERVAL) {
@@ -285,6 +290,13 @@ void loop() {
     if (WiFi.status() == WL_CONNECTED) logDataToFile();
   }
 
-  track();
-  delay(speed); 
+  // [UPDATED] Only track automatically if NOT in manual mode
+  if (!isManualMode) {
+    track();
+    delay(speed);
+  } else {
+    // In manual mode, we just wait for web commands. 
+    // Small delay to prevent CPU hogging.
+    delay(50); 
+  }
 }
