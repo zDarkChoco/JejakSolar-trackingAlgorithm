@@ -9,6 +9,7 @@
         :root {
             --primary: #2c3e50;
             --accent: #e67e22;
+            --danger: #c0392b; /* Added for OFF button */
             --bg: #ecf0f1;
             --nav-height-mobile: 70px;
             --header-height: 60px;
@@ -24,7 +25,7 @@
             padding-top: calc(var(--header-height) + 20px); 
             padding-bottom: calc(var(--nav-height-mobile) + 20px);
             transition: padding-left 0.3s;
-            user-select: none; /* Prevent text selection while dragging knobs */
+            user-select: none;
         }
 
         /* --- HEADER & SIDEBAR --- */
@@ -72,9 +73,16 @@
             background-color: var(--primary); color: white; padding: 10px 20px;
             border: none; border-radius: 5px; cursor: pointer; font-size: 1rem;
             text-decoration: none; display: inline-block; margin-bottom: 15px;
+            transition: background-color 0.2s;
         }
+        
+        /* New class for the STOP button */
+        .btn-stop {
+            background-color: var(--danger);
+        }
+        .btn-stop:active { background-color: #a93226; }
 
-        /* --- KNOB CONTROLS (NEW) --- */
+        /* --- KNOB CONTROLS --- */
         .knob-container {
             display: flex; justify-content: space-around; flex-wrap: wrap; gap: 20px; padding: 20px 0;
         }
@@ -210,7 +218,10 @@
             <h2>Axis Control</h2>
             <div class="card" style="margin-bottom: 20px;">
                 <button id="mode-btn" class="btn-action" style="width:100%;" onclick="toggleMode()">SWITCH TO MANUAL</button>
+                
+                <button id="pwr-btn" class="btn-action btn-stop" style="width:100%; margin-top: 10px;" onclick="togglePower()">SYSTEM OFF</button>
             </div>
+
             <div class="card">
                 <div class="knob-container">
                     <div class="knob-wrapper">
@@ -259,7 +270,7 @@
             if(viewId === 'history') loadHistory();
         }
 
-        // --- KNOB LOGIC (NEW) ---
+        // --- KNOB LOGIC ---
         function setupKnob(id, displayId, axisName) {
             const el = document.getElementById(id);
             const dial = el.querySelector('.knob-dial');
@@ -276,52 +287,26 @@
                 const clientX = e.touches ? e.touches[0].clientX : e.clientX;
                 const clientY = e.touches ? e.touches[0].clientY : e.clientY;
                 
-                // Calculate angle in radians
                 const deltaX = clientX - centerX;
                 const deltaY = clientY - centerY;
                 let angleRad = Math.atan2(deltaY, deltaX);
                 
-                // Convert to degrees and shift so -90deg (12 o'clock) is start
                 let deg = angleRad * (180 / Math.PI);
-                deg = (deg + 90 + 360) % 360; // Normalize 0-360
+                deg = (deg + 90 + 360) % 360; 
 
-                // Constrain to 0-180 logic (for servos)
-                // We map dial rotation: 
-                // Left (-90 vis) = 0 servo
-                // Right (90 vis) = 180 servo
-                // Let's assume standard pot behavior: 7am to 5pm
-                
-                // Simple mapping: 0 deg is Left, 180 deg is Right.
-                // We clamp values to make it behave like a 180 degree pot
-                // The visual rotation needs to offset.
-                
-                // Simplified constraint for visual UI:
-                // Map screen angle to servo angle
-                // Let's use direct mapping for simplicity
-                // Using CSS rotation directly
-                
                 let servoVal = 0;
                 
-                // Logic: 
-                // 0 degrees (Up) -> 90 servo
-                // 90 degrees (Right) -> 180 servo
-                // 270 degrees (Left) -> 0 servo
-                
-                if (deg > 270 || deg <= 90) { // Top half
-                     if (deg > 270) servoVal = (deg - 270);
-                     else servoVal = deg + 90;
+                if (deg > 270 || deg <= 90) { 
+                      if (deg > 270) servoVal = (deg - 270);
+                      else servoVal = deg + 90;
                 } else if (deg > 90 && deg < 270) {
-                     // Bottom half - clamp
-                     if(deg < 180) servoVal = 180;
-                     else servoVal = 0;
+                      if(deg < 180) servoVal = 180;
+                      else servoVal = 0;
                 }
                 
-                // Update UI
-                // Actual visual rotation
                 dial.style.transform = `rotate(${servoVal - 90}deg)`; 
                 display.innerText = Math.round(servoVal) + "°";
                 
-                // Throttled send (optional, but good for esp32)
                 updateServo(axisName, Math.round(servoVal));
             }
 
@@ -384,22 +369,40 @@
                 solarChart.data.datasets[0].data.push(val);
                 solarChart.update();
 
+                // Logic for MODE (Manual/Auto)
                 const isManual = (data.mode === "MANUAL");
                 document.getElementById('mode-btn').innerText = isManual ? "SWITCH TO AUTO" : "SWITCH TO MANUAL";
                 
-                // Toggle Knob State
+                // Logic for POWER BUTTON
+                // If the ESP32 sends "system_on": false, the button becomes Green (Turn ON)
+                // If the ESP32 sends "system_on": true, the button becomes Red (Turn OFF)
+                const pwrBtn = document.getElementById('pwr-btn');
+                const isSystemOff = (data.system_on === false); 
+
+                if(isSystemOff) {
+                    pwrBtn.innerText = "SYSTEM ON";
+                    pwrBtn.style.backgroundColor = "#27ae60"; // Green
+                } else {
+                    pwrBtn.innerText = "SYSTEM OFF";
+                    pwrBtn.style.backgroundColor = "#c0392b"; // Red
+                }
+
                 const knobs = document.querySelectorAll('.knob-outer');
                 knobs.forEach(k => isManual ? k.classList.remove('disabled') : k.classList.add('disabled'));
+
             }).catch(e => { updateStatusUI(false, 0); });
         }
         setInterval(fetchData, 2000);
 
         function toggleMode() { fetch('/setMode?toggle=1'); }
         
+        // --- NEW FUNCTION FOR POWER TOGGLE ---
+        function togglePower() { fetch('/toggleSystem'); }
+        
         let lastSend = 0;
         function updateServo(axis, val) {
             const now = Date.now();
-            if(now - lastSend > 100) { // Throttle requests to prevent ESP crash
+            if(now - lastSend > 100) { 
                 fetch(`/setServo?axis=${axis}&val=${val}`);
                 lastSend = now;
             }
